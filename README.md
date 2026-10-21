@@ -3,8 +3,9 @@
 > **Mirror note (sneakyjoeru):** this is a public mirror of
 > [nikopueringer/CorridorKey2.0](https://github.com/nikopueringer/CorridorKey2.0)
 > (upstream history preserved) with an OBS Studio adaptation added in
-> [`obs/`](obs/README.md): a real-time GPU chroma-key shader for OBS plus a
-> recipe for feeding the offline ML cutouts into OBS. All original code,
+> [`obs/`](obs/README.md): a workflow that renders the offline ML cutouts onto
+> a flat screen for OBS Studio's built-in Chroma Key filter (`obs/greenscreen.py`).
+> All original code,
 > weights pointers and the [Corridor Key Licence](LICENSE) are untouched;
 > original authorship belongs to Corridor Digital / Niko Pueringer.
 
