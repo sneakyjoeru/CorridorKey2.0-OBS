@@ -8,8 +8,9 @@ Two paths, pick by need:
 **entirely on the GPU** inside OBS — one pass, ~10 texture taps per pixel.
 It replaces OBS's built-in Chroma Key filter with a better algorithm:
 
-- **OKLab perceptual distance** instead of the YUV yz-plane: even keying across
-  dark screen folds and bright spots, no gray patch left behind.
+- **Brightness-invariant normalized-RGB keying** instead of the YUV yz-plane:
+  a dark screen fold sits zero distance from a bright one, so folds key at any
+  exposure and gray/white/black subject pixels never key out.
 - **9-tap box-filtered key distance** (`denoise` knob): webcam grain stops
   speckling through the matte.
 - **CorridorKey's own despill formula** ported from
@@ -30,11 +31,10 @@ It replaces OBS's built-in Chroma Key filter with a better algorithm:
 | Control | Meaning | Start value |
 |---|---|---|
 | `key_axis` | 0=green 1=blue 2=red screen | 0 |
-| `similarity` | key radius in OKLab chroma units | 0.30 |
-| `smoothness` | soft matte width | 0.15 |
+| `similarity` | key radius, normalized-RGB units (~0..1.2) | 0.35 |
+| `smoothness` | soft matte width | 0.10 |
 | `despill_strength` | CorridorKey despill amount | 0.6 |
 | `denoise` | 9-tap distance blend (0 = off) | 1.0 |
-| `luma_weight` | lightness term weight | 0.25 |
 
 Performance: pure pixel shader, zero CPU work, no model weights, no VRAM
 budget — it costs a fraction of a millisecond per frame at 1080p on any
