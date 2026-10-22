@@ -2,9 +2,11 @@
 
 > **Mirror note (sneakyjoeru):** this is a public mirror of
 > [nikopueringer/CorridorKey2.0](https://github.com/nikopueringer/CorridorKey2.0)
-> (upstream history preserved) with an OBS Studio adaptation added in
-> [`obs/`](obs/README.md): a workflow that renders the offline ML cutouts onto
-> a flat screen for OBS Studio's built-in Chroma Key filter (`obs/greenscreen.py`).
+> (upstream history preserved) with an OBS Studio adaptation added:
+> [`plugin/corridor-key-2.0-filter/`](plugin/corridor-key-2.0-filter/README.md) — a
+> native OBS filter named **Corridor Key 2.0** that appears next to the built-in
+> Chroma Key Filter — plus [`obs/greenscreen.py`](obs/README.md), which renders
+> the offline ML cutouts onto a flat screen for stock keying.
 > All original code,
 > weights pointers and the [Corridor Key Licence](LICENSE) are untouched;
 > original authorship belongs to Corridor Digital / Niko Pueringer.

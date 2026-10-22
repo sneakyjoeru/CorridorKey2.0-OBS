@@ -1,0 +1,109 @@
+// Corridor Key 2.0 - GPU keyer effect for the native OBS plugin.
+// Keying math: brightness-invariant normalized-RGB distance + CorridorKey
+// despill (corridorkey/runtime.py:_despill_average_srgb_torch). CC BY-NC-SA.
+uniform float4x4 ViewProj;
+uniform texture2d image;
+
+uniform float2 uv_pixel_interval;
+uniform float4 key_color = float4(0.0, 1.0, 0.0, 1.0);
+uniform float similarity = 0.35;
+uniform float smoothness = 0.10;
+uniform float despill_strength = 0.6;
+uniform float denoise = 1.0;
+
+sampler_state textureSampler {
+	Filter    = Linear;
+	AddressU  = Clamp;
+	AddressV  = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = v_in.uv;
+	return vert_out;
+}
+
+float3 toLinear(float3 c)
+{
+	return pow(max(c, 0.0), float3(2.4, 2.4, 2.4));
+}
+
+float3 normRGB(float3 lin)
+{
+	 float s = max(lin.r + lin.g + lin.b, 1e-4);
+	 return lin / s;
+}
+
+// Distance in normalized-linear-RGB space (~0..1.22): hue/saturation only,
+// brightness-invariant - screen folds key at any exposure, grays never key.
+float KeyDist(float3 srgb, float3 keynrm)
+{
+	 float3 n = normRGB(toLinear(srgb));
+	 float dr = n.x - keynrm.x;
+	 float dg = n.y - keynrm.y;
+	 float db = n.z - keynrm.z;
+	 return sqrt(dr * dr + dg * dg + db * db);
+}
+
+float FilteredKeyDist(float3 rgb, float2 uv, float3 keynrm)
+{
+	 float2 h = uv_pixel_interval;
+	 float d = KeyDist(image.Sample(textureSampler, uv - float2(h.x * 2.0, h.y)).rgb, keynrm);
+	 d += KeyDist(image.Sample(textureSampler, uv + float2(h.x * 2.0, h.y)).rgb, keynrm);
+	 d += KeyDist(image.Sample(textureSampler, uv + float2(h.x, -h.y * 2.0)).rgb, keynrm);
+	 d += KeyDist(image.Sample(textureSampler, uv + float2(-h.x, h.y * 2.0)).rgb, keynrm);
+	 d *= 2.0;
+	 d += KeyDist(rgb, keynrm);
+	 d /= 9.0;
+	 return lerp(KeyDist(rgb, keynrm), d, saturate(denoise));
+}
+
+// CorridorKey despill, generalized to the dominant channel of key_color.
+float3 Despill(float3 c)
+{
+	if (key_color.g >= key_color.r && key_color.g >= key_color.b) { // green
+		float spill = max(c.g - (c.r + c.b) * 0.5, 0.0);
+		return float3(c.r + spill * 0.5, c.g - spill, c.b + spill * 0.5);
+	} else if (key_color.b >= key_color.r) { // blue
+		float spill = max(c.b - (c.r + c.g) * 0.5, 0.0);
+		return float3(c.r + spill * 0.5, c.g + spill * 0.5, c.b - spill);
+	} else { // red
+	 float spill = max(c.r - (c.g + c.b) * 0.5, 0.0);
+	 return float3(c.r - spill, c.g + spill * 0.5, c.b + spill * 0.5);
+ }
+}
+
+float4 PSChromaKeyPro(VertData v_in) : TARGET
+{
+	float4 rgba = image.Sample(textureSampler, v_in.uv);
+
+	 float3 keynrm = normRGB(toLinear(key_color.rgb));
+
+	 float dist = FilteredKeyDist(rgba.rgb, v_in.uv, keynrm);
+	 float base = dist - similarity;
+	 float mask = pow(saturate(base / max(smoothness, 1e-4)), 1.5);
+
+	 // Despill only near the key edge so subject colors survive inside.
+	 float3 desp = Despill(rgba.rgb);
+	 float spillAmt = saturate(despill_strength) * (1.0 - mask);
+	 rgba.rgb = lerp(rgba.rgb, desp, spillAmt);
+
+	 rgba.a *= mask;
+	 return rgba;
+}
+
+technique Draw
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSChromaKeyPro(v_in);
+	}
+}
