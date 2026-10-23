@@ -90,9 +90,9 @@ static void *corridor_key_create(obs_data_t *settings, obs_source_t *context)
 		filter->color_param = gs_effect_get_param_by_name(filter->effect, "key_color");
 		filter->uv_interval_param = gs_effect_get_param_by_name(filter->effect, "uv_pixel_interval");
 		filter->similarity_param = gs_effect_get_param_by_name(filter->effect, "similarity");
-	 filter->smoothness_param = gs_effect_get_param_by_name(filter->effect, "smoothness");
-	 filter->despill_param = gs_effect_get_param_by_name(filter->effect, "despill_strength");
-	 filter->denoise_param = gs_effect_get_param_by_name(filter->effect, "denoise");
+		filter->smoothness_param = gs_effect_get_param_by_name(filter->effect, "smoothness");
+		filter->despill_param = gs_effect_get_param_by_name(filter->effect, "despill_strength");
+		filter->denoise_param = gs_effect_get_param_by_name(filter->effect, "denoise");
 	}
 
 	obs_leave_graphics();
