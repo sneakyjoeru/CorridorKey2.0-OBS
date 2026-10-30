@@ -1,0 +1,117 @@
+name: OBS plugin (Corridor Key 2.0)
+
+# Builds plugin/corridor-key-filter for Windows, macOS and Linux with the
+# obsproject/obs-plugintemplate CMake setup (no obs-studio checkout needed).
+# Run manually with publish=true to attach the packages to the release.
+on:
+  push:
+    branches: [master]
+    paths: ['plugin/corridor-key-filter/**', '.github/workflows/obs-plugin.yaml']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Upload packages to the corridor-key-2.0-obs release
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  PLUGIN_DIR: plugin/corridor-key-filter
+  NAME: corridor-key-filter
+  VERSION: 2.0.0
+  RELEASE_TAG: corridor-key-2.0-obs
+
+jobs:
+  linux:
+    name: Linux x86_64 (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OBS SDK
+        run: |
+          sudo add-apt-repository --yes ppa:obsproject/obs-studio
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends obs-studio libsimde-dev ninja-build cmake
+          dpkg -s obs-studio | grep ^Version
+      - name: Build
+        working-directory: ${{ env.PLUGIN_DIR }}
+        run: |
+          cmake --preset ubuntu-x86_64 -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+          cmake --build --preset ubuntu-x86_64
+          cmake --install build_x86_64 --prefix "$PWD/release"
+      - name: Package (per-user plugin layout)
+        working-directory: ${{ env.PLUGIN_DIR }}
+        run: |
+          U="pkg/$NAME"
+          mkdir -p "$U/bin/64bit" "$U/data"
+          cp release/lib/*/obs-plugins/$NAME.so "$U/bin/64bit/"
+          cp -r release/share/obs/obs-plugins/$NAME/. "$U/data/"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          tar -C pkg -czf "$GITHUB_WORKSPACE/dist/$NAME-$VERSION-linux-x86_64.tar.gz" "$NAME"
+          tar -tzf "$GITHUB_WORKSPACE/dist/$NAME-$VERSION-linux-x86_64.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with: { name: linux, path: dist/* }
+
+  windows:
+    name: Windows x64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        working-directory: ${{ env.PLUGIN_DIR }}
+        shell: pwsh
+        run: |
+          cmake --preset windows-x64
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build --preset windows-x64
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --install build_x64 --prefix "$PWD/release" --config RelWithDebInfo
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Package (C:\ProgramData\obs-studio\plugins layout)
+        working-directory: ${{ env.PLUGIN_DIR }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE/dist" | Out-Null
+          Get-ChildItem -Recurse release | Select-Object -ExpandProperty FullName
+          Compress-Archive -Path "release/$env:NAME" -DestinationPath "$env:GITHUB_WORKSPACE/dist/$env:NAME-$env:VERSION-windows-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: dist/* }
+
+  macos:
+    name: macOS universal
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        working-directory: ${{ env.PLUGIN_DIR }}
+        run: |
+          cmake --preset macos
+          cmake --build --preset macos
+          cmake --install build_macos --prefix "$PWD/release" --config RelWithDebInfo
+          ls -la release
+      - name: Package
+        working-directory: ${{ env.PLUGIN_DIR }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          ditto -c -k --keepParent "release/$NAME.plugin" "$GITHUB_WORKSPACE/dist/$NAME-$VERSION-macos-universal.zip"
+          cp "release/$NAME.pkg" "$GITHUB_WORKSPACE/dist/$NAME-$VERSION-macos-universal.pkg"
+          lipo -info "release/$NAME.plugin/Contents/MacOS/$NAME"
+      - uses: actions/upload-artifact@v4
+        with: { name: macos, path: dist/* }
+
+  publish:
+    name: Attach to release
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la dist
+          gh release upload "$RELEASE_TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"

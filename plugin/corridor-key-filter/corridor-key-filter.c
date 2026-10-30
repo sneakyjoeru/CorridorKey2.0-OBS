@@ -189,7 +189,7 @@ static obs_properties_t *corridor_key_properties(void *data)
 	return props;
 }
 
-struct obs_source_info corridor_key_filter = {
+static struct obs_source_info corridor_key_filter = {
 	.id = "corridor_key_2_filter",
 	.type = OBS_SOURCE_TYPE_FILTER,
 	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_SRGB,
@@ -203,7 +203,10 @@ struct obs_source_info corridor_key_filter = {
 };
 
 OBS_DECLARE_MODULE()
-OBS_MODULE_USE_DEFAULT_LOCALE("corridor-key-2.0-filter", "en-US")
+/* Module name must not contain '.': OBS strips a per-user plugin folder name
+ * at its last '.', so "corridor-key-2.0-filter" would be looked up as
+ * "corridor-key-2" and never load. Must equal buildspec.json "name". */
+OBS_MODULE_USE_DEFAULT_LOCALE("corridor-key-filter", "en-US")
 
 MODULE_EXPORT const char *obs_module_description(void)
 {
