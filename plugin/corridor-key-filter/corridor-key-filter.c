@@ -43,11 +43,9 @@ static inline void settings_update(struct corridor_key_filter_data *filter, obs_
 {
 	uint32_t key_color = (uint32_t)obs_data_get_int(settings, SETTING_KEY_COLOR);
 
-	/* OBS stores colors as RRGGBB hex ints; build a 0-1 sRGB vec4. */
-	filter->color.x = ((key_color >> 16) & 0xFF) / 255.0f;
-	filter->color.y = ((key_color >> 8) & 0xFF) / 255.0f;
-	filter->color.z = (key_color & 0xFF) / 255.0f;
-	filter->color.w = 1.0f;
+	/* OBS color ints are 0xAABBGGRR (R in the low byte): decode exactly like
+	 * the built-in chroma key does. */
+	vec4_from_rgba(&filter->color, key_color | 0xFF000000);
 
 	filter->similarity = (float)obs_data_get_int(settings, SETTING_SIMILARITY) / 1000.0f;
 	filter->smoothness = (float)obs_data_get_int(settings, SETTING_SMOOTHNESS) / 1000.0f;

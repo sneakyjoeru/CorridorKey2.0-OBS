@@ -83,6 +83,9 @@ float3 Despill(float3 c)
 float4 PSChromaKeyPro(VertData v_in) : TARGET
 {
 	float4 rgba = image.Sample(textureSampler, v_in.uv);
+	// OBS textures are premultiplied: key on straight color (as the
+	// built-in chroma_key_filter_v2.effect does), premultiply the result.
+	rgba.rgb *= (rgba.a > 0.) ? (1. / rgba.a) : 0.;
 
 	 float3 keynrm = normRGB(toLinear(key_color.rgb));
 
@@ -96,6 +99,7 @@ float4 PSChromaKeyPro(VertData v_in) : TARGET
 	 rgba.rgb = lerp(rgba.rgb, desp, spillAmt);
 
 	 rgba.a *= mask;
+	 rgba.rgb *= rgba.a;
 	 return rgba;
 }
 
