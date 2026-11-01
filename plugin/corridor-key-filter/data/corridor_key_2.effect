@@ -5,7 +5,8 @@ uniform float4x4 ViewProj;
 uniform texture2d image;
 
 uniform float2 uv_pixel_interval;
-uniform float4 key_color = float4(0.0, 1.0, 0.0, 1.0);
+// Brace initializer: OBS < 32.2 effect parser rejects float4(...) here.
+uniform float4 key_color = {0.0, 1.0, 0.0, 1.0};
 uniform float similarity = 0.35;
 uniform float smoothness = 0.10;
 uniform float despill_strength = 0.6;
