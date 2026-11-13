@@ -10,8 +10,8 @@ shader, no runtime toggles.
 - `corridor-key-filter.c` registers an `obs_source_info` of type
   `OBS_SOURCE_TYPE_FILTER` (same pattern as OBS's own `chroma-key-filter.c`).
 - `data/corridor_key_2.effect` is the GPU HLSL effect: brightness-invariant
-  normalized-RGB key distance + 9-tap denoise + CorridorKey despill, gated to
-  edge pixels. One pass on the render GPU, same cost class as the built-in filter.
+  normalized-RGB key distance + 9-tap denoise + CorridorKey despill on the whole
+  foreground. One pass on the render GPU, same cost class as the built-in filter.
 
 ## Install (prebuilt)
 
@@ -19,12 +19,12 @@ Download your OS package from the
 [release](https://github.com/sneakyjoeru/CorridorKey2.0-OBS/releases/tag/corridor-key-2.0-obs)
 (built for OBS 31/32, 64-bit), close OBS, then:
 
-1. **Windows** — unzip `corridor-key-filter-2.0.0-windows-x64.zip` into
+1. **Windows** — unzip `corridor-key-filter-2.0.1-windows-x64.zip` into
    `C:\ProgramData\obs-studio\plugins\` (you get
    `...\plugins\corridor-key-filter\bin\64bit\corridor-key-filter.dll`).
-2. **Linux** — `mkdir -p ~/.config/obs-studio/plugins && tar -xzf corridor-key-filter-2.0.0-linux-x86_64.tar.gz -C ~/.config/obs-studio/plugins/`
+2. **Linux** — `mkdir -p ~/.config/obs-studio/plugins && tar -xzf corridor-key-filter-2.0.1-linux-x86_64.tar.gz -C ~/.config/obs-studio/plugins/`
    (Flatpak OBS: `~/.var/app/com.obsproject.Studio/config/obs-studio/plugins/`).
-3. **macOS** — run `corridor-key-filter-2.0.0-macos-universal.pkg`, or unzip the
+3. **macOS** — run `corridor-key-filter-2.0.1-macos-universal.pkg`, or unzip the
    `.zip` and copy `corridor-key-filter.plugin` into
    `~/Library/Application Support/obs-studio/plugins/`. The build is ad-hoc
    signed, not notarized: if macOS blocks it, run
@@ -56,7 +56,7 @@ from the per-user plugin folders.
 | Key color | eyedropper color of your screen | `#00FF00` |
 | Similarity | key radius (normalized-RGB units ×1000) | 350 |
 | Smoothness | matte feather (×1000) | 100 |
-| Despill strength | CorridorKey despill, edges only | 600 |
+| Despill strength | CorridorKey despill (0 = off, 1000 = full) on every kept pixel whose key channel exceeds the mean of the other two; skin/grays unchanged | 600 |
 | Denoise | 9-tap edge denoise blend | 1.0 |
 
 ## License

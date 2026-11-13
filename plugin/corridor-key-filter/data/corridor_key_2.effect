@@ -94,10 +94,14 @@ float4 PSChromaKeyPro(VertData v_in) : TARGET
 	 float base = dist - similarity;
 	 float mask = pow(saturate(base / max(smoothness, 1e-4)), 1.5);
 
-	 // Despill only near the key edge so subject colors survive inside.
+	 // Despill the whole foreground, like CorridorKey's reference
+	 // (_despill_average_srgb_torch: fg*(1-s) + despilled*s). Gating it by
+	 // (1 - mask) limited it to the 1-2 px alpha ramp, so the slider had no
+	 // visible effect on opaque subject pixels. Despill only touches pixels
+	 // whose key channel exceeds the mean of the other two, so skin and grays
+	 // are unchanged.
 	 float3 desp = Despill(rgba.rgb);
-	 float spillAmt = saturate(despill_strength) * (1.0 - mask);
-	 rgba.rgb = lerp(rgba.rgb, desp, spillAmt);
+	 rgba.rgb = lerp(rgba.rgb, desp, saturate(despill_strength));
 
 	 rgba.a *= mask;
 	 rgba.rgb *= rgba.a;
