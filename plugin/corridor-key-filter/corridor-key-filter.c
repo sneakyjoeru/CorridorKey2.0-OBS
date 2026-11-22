@@ -235,6 +235,11 @@ static void *corridor_key_create(obs_data_t *settings, obs_source_t *context)
 			gs_effect_get_param_by_name(filter->effect, "plate_tolerance");
 		filter->plate_softness_param =
 			gs_effect_get_param_by_name(filter->effect, "plate_softness");
+
+		/* Support evidence when a machine keys differently: which colour
+		 * space libobs is rendering in for this session. */
+		blog(LOG_INFO, "[corridor-key] ready (linear sRGB: %s)",
+		     gs_get_linear_srgb() ? "on" : "off");
 	}
 
 	obs_leave_graphics();
@@ -321,13 +326,14 @@ static void corridor_key_render(void *data, gs_effect_t *effect)
 			gs_effect_set_float(filter->denoise_param, filter->denoise);
 
 			if (plate_tex && filter->plate_param) {
-				/* Sample the plate exactly like libobs samples the live
-				 * frame in render_filter_tex: sRGB view in linear mode,
-				 * plain view otherwise. */
-				if (gs_get_linear_srgb())
-					gs_effect_set_texture_srgb(filter->plate_param, plate_tex);
-				else
-					gs_effect_set_texture(filter->plate_param, plate_tex);
+				/* Read the plate raw. The capture pass writes the frame into
+				 * its render target without an sRGB encode on either backend
+				 * (measured on D3D11 and GL), so the stored values must not be
+				 * decoded again: the live frame already arrives in whatever
+				 * space libobs hands the shader. Binding an sRGB view here
+				 * makes the plate darker than the live frame and nothing ever
+				 * keys (that is exactly how 2.1.0 failed on Windows). */
+				gs_effect_set_texture(filter->plate_param, plate_tex);
 
 				gs_effect_set_float(filter->plate_tolerance_param, filter->plate_tolerance);
 				gs_effect_set_float(filter->plate_softness_param, filter->plate_softness);
