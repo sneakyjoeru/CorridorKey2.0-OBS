@@ -31,6 +31,7 @@ struct corridor_key_filter_data {
 	gs_eparam_t *despill_param;
 	gs_eparam_t *denoise_param;
 	gs_eparam_t *plate_param;
+	gs_eparam_t *frame_param;
 	gs_eparam_t *plate_tolerance_param;
 	gs_eparam_t *plate_softness_param;
 
@@ -41,11 +42,13 @@ struct corridor_key_filter_data {
 	float denoise;
 
 	/* Static background removal: one frame of the empty background
-	 * ("plate") captured on demand, plus the difference-key settings. The
-	 * plate lives in its own render target so its colour space matches the
-	 * frame the key pass compares it against. */
+	 * ("plate") captured on demand, plus a per-frame copy of the live frame
+	 * taken through the same copy pass, so both are stored identically and
+	 * the difference key cannot be skewed by backend colour handling. */
 	gs_texrender_t *plate_render;
+	gs_texrender_t *frame_render;
 	gs_texture_t *null_texture;
+	enum gs_color_format plate_format;
 
 	bool plate_mode;
 	bool plate_capture_requested;
@@ -100,56 +103,66 @@ static gs_texture_t *plate_texture(struct corridor_key_filter_data *filter)
 	return filter->plate_render ? gs_texrender_get_texture(filter->plate_render) : NULL;
 }
 
-static void plate_release(struct corridor_key_filter_data *filter)
+static void null_texture_bind(struct corridor_key_filter_data *filter, gs_eparam_t *param)
 {
-	if (!filter->plate_render)
+	if (!param)
 		return;
 
-	/* The effect keeps a raw pointer to the texture it was last given, and
-	 * OBS re-applies every shader parameter on each draw. Point the parameter
-	 * at a blank 1x1 texture before freeing the plate so the next draw can
-	 * never bind a freed texture. */
-	if (filter->plate_param) {
-		if (!filter->null_texture) {
-			static const uint8_t blank[4] = {0, 0, 0, 0};
-			const uint8_t *blank_mip[1] = {blank};
-			filter->null_texture = gs_texture_create(1, 1, GS_RGBA, 1, blank_mip, 0);
-		}
-		if (filter->null_texture)
-			gs_effect_set_texture(filter->plate_param, filter->null_texture);
+	if (!filter->null_texture) {
+		static const uint8_t blank[4] = {0, 0, 0, 0};
+		const uint8_t *blank_mip[1] = {blank};
+		filter->null_texture = gs_texture_create(1, 1, GS_RGBA, 1, blank_mip, 0);
 	}
-
-	gs_texrender_destroy(filter->plate_render);
-	filter->plate_render = NULL;
+	if (filter->null_texture)
+		gs_effect_set_texture(param, filter->null_texture);
 }
 
-/* Grabs one frame of the filter input as the plate: the parent is rendered
- * through this filter's "Copy" technique into the plate's own render target,
- * using the same colour space as the key pass, so the stored frame and the
- * live frame are directly comparable in the shader. */
-static void plate_capture(struct corridor_key_filter_data *filter, enum gs_color_format format,
-			  enum gs_color_space space, uint32_t width, uint32_t height)
+/* Drops a render target. The effect keeps a raw pointer to the texture it was
+ * last given and OBS re-applies every shader parameter on each draw, so the
+ * parameter is pointed at a blank 1x1 texture first: no draw can ever bind a
+ * freed texture. */
+static void target_release(struct corridor_key_filter_data *filter, gs_texrender_t **target,
+			   gs_eparam_t *param)
+{
+	if (!*target)
+		return;
+
+	null_texture_bind(filter, param);
+	gs_texrender_destroy(*target);
+	*target = NULL;
+}
+
+static void plate_release(struct corridor_key_filter_data *filter)
+{
+	target_release(filter, &filter->plate_render, filter->plate_param);
+}
+
+static void frame_release(struct corridor_key_filter_data *filter)
+{
+	target_release(filter, &filter->frame_render, filter->frame_param);
+}
+
+/* Copies the filter input into `target` with this filter's "Copy" technique.
+ * The plate and the per-frame copy both come through this one function, so
+ * their stored pixels are comparable no matter how the backend encodes render
+ * targets (D3D11 and GL disagree, and guessing the convention broke 2.1.0 on
+ * Windows - see the README). */
+static bool copy_frame_into(struct corridor_key_filter_data *filter, gs_texrender_t **target,
+			    enum gs_color_format format, enum gs_color_space space, uint32_t width,
+			    uint32_t height)
 {
 	struct vec4 clear_color;
 	bool rendered;
 
-	if (!width || !height)
-		return;
-
-	plate_release(filter);
-
-	filter->plate_render = gs_texrender_create(format, GS_ZS_NONE);
-	if (!filter->plate_render) {
-		blog(LOG_WARNING, "[corridor-key] plate capture failed: no capture texture");
-		return;
-	}
+	if (!*target)
+		*target = gs_texrender_create(format, GS_ZS_NONE);
+	if (!*target)
+		return false;
 
 	gs_matrix_push();
-	if (!gs_texrender_begin_with_color_space(filter->plate_render, width, height, space)) {
+	if (!gs_texrender_begin_with_color_space(*target, width, height, space)) {
 		gs_matrix_pop();
-		blog(LOG_WARNING, "[corridor-key] plate capture failed: cannot render to texture");
-		plate_release(filter);
-		return;
+		return false;
 	}
 
 	vec4_zero(&clear_color);
@@ -161,17 +174,23 @@ static void plate_capture(struct corridor_key_filter_data *filter, enum gs_color
 	if (rendered)
 		obs_source_process_filter_tech_end(filter->context, filter->effect, width, height, "Copy");
 
-	gs_texrender_end(filter->plate_render);
+	gs_texrender_end(*target);
 	gs_matrix_pop();
 
-	if (!rendered) {
-		blog(LOG_WARNING, "[corridor-key] plate capture failed: filter bypassed, no frame read");
-		plate_release(filter);
-		return;
-	}
+	return rendered && gs_texrender_get_texture(*target) != NULL;
+}
 
-	if (!plate_texture(filter)) {
-		blog(LOG_WARNING, "[corridor-key] plate capture failed: empty capture texture");
+/* Grabs one frame of the filter input as the plate. */
+static void plate_capture(struct corridor_key_filter_data *filter, enum gs_color_format format,
+			  enum gs_color_space space, uint32_t width, uint32_t height)
+{
+	if (!width || !height)
+		return;
+
+	plate_release(filter);
+
+	if (!copy_frame_into(filter, &filter->plate_render, format, space, width, height)) {
+		blog(LOG_WARNING, "[corridor-key] plate capture failed: no frame read");
 		plate_release(filter);
 		return;
 	}
@@ -191,10 +210,11 @@ static void corridor_key_destroy(void *data)
 {
 	struct corridor_key_filter_data *filter = data;
 
-	if (filter->effect || filter->plate_render || filter->null_texture) {
+	if (filter->effect || filter->plate_render || filter->frame_render || filter->null_texture) {
 		obs_enter_graphics();
 
 		plate_release(filter);
+		frame_release(filter);
 
 		if (filter->null_texture) {
 			gs_texture_destroy(filter->null_texture);
@@ -231,6 +251,7 @@ static void *corridor_key_create(obs_data_t *settings, obs_source_t *context)
 		filter->despill_param = gs_effect_get_param_by_name(filter->effect, "despill_strength");
 		filter->denoise_param = gs_effect_get_param_by_name(filter->effect, "denoise");
 		filter->plate_param = gs_effect_get_param_by_name(filter->effect, "plate_image");
+		filter->frame_param = gs_effect_get_param_by_name(filter->effect, "frame_image");
 		filter->plate_tolerance_param =
 			gs_effect_get_param_by_name(filter->effect, "plate_tolerance");
 		filter->plate_softness_param =
@@ -290,7 +311,8 @@ static void corridor_key_render(void *data, gs_effect_t *effect)
 	} else {
 		const enum gs_color_format format = gs_get_format_from_space(source_space);
 		const char *tech_name = "Draw";
-		gs_texture_t *plate_tex;
+		gs_texture_t *plate_tex = NULL;
+		gs_texture_t *frame_tex = NULL;
 
 		if (filter->plate_clear_requested) {
 			plate_release(filter);
@@ -298,21 +320,38 @@ static void corridor_key_render(void *data, gs_effect_t *effect)
 			plate_schedule_capture(filter);
 		}
 
+		/* A source colour-space change invalidates both stored frames. */
+		if (filter->plate_format != format) {
+			plate_release(filter);
+			frame_release(filter);
+			filter->plate_format = format;
+		}
+
 		if (filter->plate_arm_ns && os_gettime_ns() >= filter->plate_arm_ns) {
 			filter->plate_arm_ns = 0;
 			filter->plate_capture_requested = true;
 		}
 
-		/* Capture before the key pass: both run one begin/end pair of their
-		 * own, and the capture must read the unkeyed frame. */
+		/* Every copy pass below runs its own begin/end pair before the key
+		 * pass, so it always reads the unkeyed frame. */
 		if (filter->plate_mode && filter->plate_capture_requested) {
 			plate_capture(filter, format, source_space, width, height);
 			filter->plate_capture_requested = false;
 		}
 
-		plate_tex = plate_texture(filter);
-		if (filter->plate_mode)
-			tech_name = plate_tex ? "DrawPlate" : "Copy";
+		if (filter->plate_mode) {
+			plate_tex = plate_texture(filter);
+
+			if (!plate_tex)
+				tech_name = "Copy";
+			else if (copy_frame_into(filter, &filter->frame_render, format, source_space, width,
+						 height)) {
+				frame_tex = gs_texrender_get_texture(filter->frame_render);
+				tech_name = frame_tex ? "DrawPlate" : "Copy";
+			} else {
+				tech_name = "Copy";
+			}
+		}
 
 		if (obs_source_process_filter_begin_with_color_space(filter->context, format, source_space,
 								    OBS_ALLOW_DIRECT_RENDERING)) {
@@ -325,15 +364,13 @@ static void corridor_key_render(void *data, gs_effect_t *effect)
 			gs_effect_set_float(filter->despill_param, filter->despill);
 			gs_effect_set_float(filter->denoise_param, filter->denoise);
 
-			if (plate_tex && filter->plate_param) {
-				/* Read the plate raw. The capture pass writes the frame into
-				 * its render target without an sRGB encode on either backend
-				 * (measured on D3D11 and GL), so the stored values must not be
-				 * decoded again: the live frame already arrives in whatever
-				 * space libobs hands the shader. Binding an sRGB view here
-				 * makes the plate darker than the live frame and nothing ever
-				 * keys (that is exactly how 2.1.0 failed on Windows). */
+			if (plate_tex && frame_tex && filter->plate_param && filter->frame_param) {
+				/* Both textures come from the same copy pass, so bind
+				 * them the same way and the comparison is exact on any
+				 * backend: no assumption about how the render target
+				 * encodes values. */
 				gs_effect_set_texture(filter->plate_param, plate_tex);
+				gs_effect_set_texture(filter->frame_param, frame_tex);
 
 				gs_effect_set_float(filter->plate_tolerance_param, filter->plate_tolerance);
 				gs_effect_set_float(filter->plate_softness_param, filter->plate_softness);

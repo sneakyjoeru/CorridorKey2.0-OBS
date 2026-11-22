@@ -13,8 +13,11 @@ uniform float despill_strength = 0.6;
 uniform float denoise = 1.0;
 
 // Static background removal: one frame of the empty background, captured by
-// the C side, plus the tolerance/softness of the difference key.
+// the C side, plus this frame copied through the same pass, so both textures
+// hold identically stored pixels and nothing depends on backend colour
+// handling.
 uniform texture2d plate_image;
+uniform texture2d frame_image;
 uniform float plate_tolerance = 0.06;
 uniform float plate_softness = 0.06;
 
@@ -84,7 +87,7 @@ float PlateDiff(float3 a, float3 b)
 
 float PlateDiffAt(float2 uv)
 {
-	return PlateDiff(image.Sample(textureSampler, uv).rgb,
+	return PlateDiff(frame_image.Sample(textureSampler, uv).rgb,
 	                 plate_image.Sample(textureSampler, uv).rgb);
 }
 
