@@ -108,13 +108,15 @@ static gs_texture_t *plate_texture(struct corridor_key_filter_data *filter)
 
 /* Which pass plate mode is running, logged only when it changes: the OBS log
  * then shows whether a machine keyed, passed through, or failed to copy. */
-static void log_pass(struct corridor_key_filter_data *filter, const char *pass)
+static void log_pass(struct corridor_key_filter_data *filter, const char *pass, gs_texture_t *plate,
+		     gs_texture_t *frame)
 {
 	if (filter->logged_pass && strcmp(filter->logged_pass, pass) == 0)
 		return;
 
 	filter->logged_pass = pass;
-	blog(LOG_INFO, "[corridor-key] plate pass: %s", pass);
+	blog(LOG_INFO, "[corridor-key] plate pass: %s (plate_texture %p, frame_texture %p)", pass,
+	     (void *)plate, (void *)frame);
 }
 
 static void null_texture_bind(struct corridor_key_filter_data *filter, gs_eparam_t *param)
@@ -300,9 +302,14 @@ static void *corridor_key_create(obs_data_t *settings, obs_source_t *context)
 			gs_effect_get_param_by_name(filter->effect, "plate_softness");
 
 		/* Support evidence when a machine keys differently: which colour
-		 * space libobs is rendering in for this session. */
-		blog(LOG_INFO, "[corridor-key] ready (linear sRGB: %s)",
-		     gs_get_linear_srgb() ? "on" : "off");
+		 * space libobs is rendering in, and that the plate parameters exist
+		 * (a missing parameter means plate mode would compare black on
+		 * black and key everything). */
+		blog(LOG_INFO,
+		     "[corridor-key] ready (linear sRGB: %s, params plate=%p frame=%p tol=%p soft=%p)",
+		     gs_get_linear_srgb() ? "on" : "off", (void *)filter->plate_param,
+		     (void *)filter->frame_param, (void *)filter->plate_tolerance_param,
+		     (void *)filter->plate_softness_param);
 	}
 
 	obs_leave_graphics();
@@ -394,7 +401,7 @@ static void corridor_key_render(void *data, gs_effect_t *effect)
 				tech_name = "Copy";
 			}
 
-			log_pass(filter, tech_name);
+			log_pass(filter, tech_name, plate_tex, frame_tex);
 		}
 
 		if (obs_source_process_filter_begin_with_color_space(filter->context, format, source_space,
