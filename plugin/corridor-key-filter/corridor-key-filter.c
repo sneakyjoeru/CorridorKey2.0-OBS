@@ -8,6 +8,7 @@
 #include <graphics/vec2.h>
 #include <graphics/vec4.h>
 #include <util/platform.h>
+#include <string.h>
 
 #define SETTING_KEY_COLOR   "key_color"
 #define SETTING_SIMILARITY  "similarity"
@@ -49,6 +50,8 @@ struct corridor_key_filter_data {
 	gs_texrender_t *frame_render;
 	gs_texture_t *null_texture;
 	enum gs_color_format plate_format;
+	const char *logged_pass;
+	const char *copy_error;
 
 	bool plate_mode;
 	bool plate_capture_requested;
@@ -103,6 +106,17 @@ static gs_texture_t *plate_texture(struct corridor_key_filter_data *filter)
 	return filter->plate_render ? gs_texrender_get_texture(filter->plate_render) : NULL;
 }
 
+/* Which pass plate mode is running, logged only when it changes: the OBS log
+ * then shows whether a machine keyed, passed through, or failed to copy. */
+static void log_pass(struct corridor_key_filter_data *filter, const char *pass)
+{
+	if (filter->logged_pass && strcmp(filter->logged_pass, pass) == 0)
+		return;
+
+	filter->logged_pass = pass;
+	blog(LOG_INFO, "[corridor-key] plate pass: %s", pass);
+}
+
 static void null_texture_bind(struct corridor_key_filter_data *filter, gs_eparam_t *param)
 {
 	if (!param)
@@ -142,26 +156,44 @@ static void frame_release(struct corridor_key_filter_data *filter)
 	target_release(filter, &filter->frame_render, filter->frame_param);
 }
 
+/* Why the last copy pass failed, logged only when the reason changes. */
+static void copy_error(struct corridor_key_filter_data *filter, const char *why)
+{
+	if (filter->copy_error && strcmp(filter->copy_error, why) == 0)
+		return;
+
+	filter->copy_error = why;
+	blog(LOG_WARNING, "[corridor-key] frame copy problem: %s", why);
+}
+
 /* Copies the filter input into `target` with this filter's "Copy" technique.
  * The plate and the per-frame copy both come through this one function, so
  * their stored pixels are comparable no matter how the backend encodes render
  * targets (D3D11 and GL disagree, and guessing the convention broke 2.1.0 on
  * Windows - see the README). */
 static bool copy_frame_into(struct corridor_key_filter_data *filter, gs_texrender_t **target,
-			    enum gs_color_format format, enum gs_color_space space, uint32_t width,
-			    uint32_t height)
+			    gs_eparam_t *param, enum gs_color_format format, enum gs_color_space space,
+			    uint32_t width, uint32_t height)
 {
 	struct vec4 clear_color;
 	bool rendered;
 
-	if (!*target)
+	if (*target) {
+		/* gs_texrender_begin() only works once per gs_texrender_reset() and
+		 * the reset frees the texture, so unbind it first. */
+		null_texture_bind(filter, param);
+		gs_texrender_reset(*target);
+	} else {
 		*target = gs_texrender_create(format, GS_ZS_NONE);
-	if (!*target)
-		return false;
+	}
 
-	gs_matrix_push();
+	if (!*target) {
+		copy_error(filter, "no render target");
+		return false;
+	}
+
 	if (!gs_texrender_begin_with_color_space(*target, width, height, space)) {
-		gs_matrix_pop();
+		copy_error(filter, "render target begin failed");
 		return false;
 	}
 
@@ -175,9 +207,18 @@ static bool copy_frame_into(struct corridor_key_filter_data *filter, gs_texrende
 		obs_source_process_filter_tech_end(filter->context, filter->effect, width, height, "Copy");
 
 	gs_texrender_end(*target);
-	gs_matrix_pop();
 
-	return rendered && gs_texrender_get_texture(*target) != NULL;
+	if (!rendered) {
+		copy_error(filter, "filter begin refused");
+		return false;
+	}
+	if (!gs_texrender_get_texture(*target)) {
+		copy_error(filter, "no texture after the copy draw");
+		return false;
+	}
+
+	filter->copy_error = NULL;
+	return true;
 }
 
 /* Grabs one frame of the filter input as the plate. */
@@ -189,7 +230,8 @@ static void plate_capture(struct corridor_key_filter_data *filter, enum gs_color
 
 	plate_release(filter);
 
-	if (!copy_frame_into(filter, &filter->plate_render, format, space, width, height)) {
+	if (!copy_frame_into(filter, &filter->plate_render, filter->plate_param, format, space, width,
+			     height)) {
 		blog(LOG_WARNING, "[corridor-key] plate capture failed: no frame read");
 		plate_release(filter);
 		return;
@@ -344,13 +386,15 @@ static void corridor_key_render(void *data, gs_effect_t *effect)
 
 			if (!plate_tex)
 				tech_name = "Copy";
-			else if (copy_frame_into(filter, &filter->frame_render, format, source_space, width,
-						 height)) {
+			else if (copy_frame_into(filter, &filter->frame_render, filter->frame_param,
+						 format, source_space, width, height)) {
 				frame_tex = gs_texrender_get_texture(filter->frame_render);
 				tech_name = frame_tex ? "DrawPlate" : "Copy";
 			} else {
 				tech_name = "Copy";
 			}
+
+			log_pass(filter, tech_name);
 		}
 
 		if (obs_source_process_filter_begin_with_color_space(filter->context, format, source_space,
