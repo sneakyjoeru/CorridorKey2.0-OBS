@@ -5,7 +5,7 @@
 > (upstream history preserved) with an OBS Studio adaptation added:
 > [`plugin/corridor-key-filter/`](plugin/corridor-key-filter/README.md) — a
 > native OBS filter named **Corridor Key 2.0** that appears next to the built-in
-> Chroma Key Filter — green/blue screen keying *and*, since 2.1.0, static
+> Chroma Key Filter — green/blue screen keying *and*, since 2.1.2, static
 > background removal with no screen at all (capture a plate of the empty scene,
 > everything within the plate tolerance is keyed out) — with prebuilt
 > Windows/macOS/Linux packages on the
