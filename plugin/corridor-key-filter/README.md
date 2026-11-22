@@ -12,6 +12,11 @@ shader, no runtime toggles.
 - `data/corridor_key_2.effect` is the GPU HLSL effect: brightness-invariant
   normalized-RGB key distance + 9-tap denoise + CorridorKey despill on the whole
   foreground. One pass on the render GPU, same cost class as the built-in filter.
+- **Static background removal** needs no green screen at all: the filter grabs
+  one frame of the empty scene into a "plate" texture (one extra GPU pass, on
+  demand) and keys out everything within *plate tolerance* of that stored
+  frame. Anything that was not in the plate — a person, a hand, a moving prop —
+  stays. Nudge the plate tolerance up when the room light flickers.
 
 ## Install (prebuilt)
 
@@ -19,12 +24,12 @@ Download your OS package from the
 [release](https://github.com/sneakyjoeru/CorridorKey2.0-OBS/releases/tag/corridor-key-2.0-obs)
 (built for OBS 31/32, 64-bit), close OBS, then:
 
-1. **Windows** — unzip `corridor-key-filter-2.0.1-windows-x64.zip` into
+1. **Windows** — unzip `corridor-key-filter-2.1.0-windows-x64.zip` into
    `C:\ProgramData\obs-studio\plugins\` (you get
    `...\plugins\corridor-key-filter\bin\64bit\corridor-key-filter.dll`).
-2. **Linux** — `mkdir -p ~/.config/obs-studio/plugins && tar -xzf corridor-key-filter-2.0.1-linux-x86_64.tar.gz -C ~/.config/obs-studio/plugins/`
+2. **Linux** — `mkdir -p ~/.config/obs-studio/plugins && tar -xzf corridor-key-filter-2.1.0-linux-x86_64.tar.gz -C ~/.config/obs-studio/plugins/`
    (Flatpak OBS: `~/.var/app/com.obsproject.Studio/config/obs-studio/plugins/`).
-3. **macOS** — run `corridor-key-filter-2.0.1-macos-universal.pkg`, or unzip the
+3. **macOS** — run `corridor-key-filter-2.1.0-macos-universal.pkg`, or unzip the
    `.zip` and copy `corridor-key-filter.plugin` into
    `~/Library/Application Support/obs-studio/plugins/`. The build is ad-hoc
    signed, not notarized: if macOS blocks it, run
@@ -58,6 +63,28 @@ from the per-user plugin folders.
 | Smoothness | matte feather (×1000) | 100 |
 | Despill strength | CorridorKey despill (0 = off, 1000 = full) on every kept pixel whose key channel exceeds the mean of the other two; skin/grays unchanged | 600 |
 | Denoise | 9-tap edge denoise blend | 1.0 |
+| Remove static background | switch the keyer from a colour to the captured plate | off |
+| Plate tolerance | how far a pixel may differ from the plate and still be removed (×1000 of the 0..1 encoded range) | 60 |
+| Plate softness | feather of the plate matte (×1000) | 60 |
+| Auto-capture delay | seconds between switching plate mode on and the automatic capture; 0 = only the button captures | 5 |
+| Capture plate now | grabs the current frame as the plate — be out of shot, or cover the camera | — |
+| Clear captured plate | forget the plate (the filter then passes the image through untouched) | — |
+
+### Removing a static background
+
+1. Lock the camera: fixed position, and exposure/white balance locked if you can.
+2. Add the filter, tick **Remove static background**.
+3. Leave the shot (or cover the lens) and press **Capture plate now** — or press
+   it at any time while nothing but the background is visible. With auto-capture
+   on, it fires by itself after the delay.
+4. Raise **Plate tolerance** until the background is fully gone; lower it if
+   parts of you disappear. **Plate softness** softens the matte edge.
+
+The plate is one still frame, so it only works for a locked-off camera: unsteady
+cameras, auto-exposure pumping or daylight drift will show through. Re-capture
+the plate whenever the lighting changes. Shadows and reflections of the subject
+in the background are *not* in the plate, so they stay — that is the same
+roughness as any difference key and usually reads as natural.
 
 ## License
 

@@ -12,6 +12,12 @@ uniform float smoothness = 0.10;
 uniform float despill_strength = 0.6;
 uniform float denoise = 1.0;
 
+// Static background removal: one frame of the empty background, captured by
+// the C side, plus the tolerance/softness of the difference key.
+uniform texture2d plate_image;
+uniform float plate_tolerance = 0.06;
+uniform float plate_softness = 0.06;
+
 sampler_state textureSampler {
 	Filter    = Linear;
 	AddressU  = Clamp;
@@ -66,6 +72,37 @@ float FilteredKeyDist(float3 rgb, float2 uv, float3 keynrm)
 	 return lerp(KeyDist(rgb, keynrm), d, saturate(denoise));
 }
 
+// --- Static background removal ("plate") --------------------------------
+// The C side captures one frame of the empty background into plate_image;
+// every pixel within plate_tolerance of that stored frame is keyed out. The
+// difference is measured in the encoded (sRGB) space OBS hands us, so the
+// tolerance behaves the same in shadows and in highlights.
+float PlateDiff(float3 a, float3 b)
+{
+	return dot(abs(a - b), float3(0.299, 0.587, 0.114));
+}
+
+float PlateDiffAt(float2 uv)
+{
+	return PlateDiff(image.Sample(textureSampler, uv).rgb,
+	                 plate_image.Sample(textureSampler, uv).rgb);
+}
+
+// Same 9-tap neighbourhood as FilteredKeyDist, applied to the plate difference
+// so sensor noise does not punch holes into the removed background.
+float FilteredPlateDiff(float2 uv)
+{
+	 float2 h = uv_pixel_interval;
+	 float d = PlateDiffAt(uv - float2(h.x * 2.0, h.y));
+	 d += PlateDiffAt(uv + float2(h.x * 2.0, h.y));
+	 d += PlateDiffAt(uv + float2(h.x, -h.y * 2.0));
+	 d += PlateDiffAt(uv + float2(-h.x, h.y * 2.0));
+	 d *= 2.0;
+	 d += PlateDiffAt(uv);
+	 d /= 9.0;
+	 return lerp(PlateDiffAt(uv), d, saturate(denoise));
+}
+
 // CorridorKey despill, generalized to the dominant channel of key_color.
 float3 Despill(float3 c)
 {
@@ -108,11 +145,51 @@ float4 PSChromaKeyPro(VertData v_in) : TARGET
 	 return rgba;
 }
 
+// Static background removal: alpha comes from the distance to the captured
+// plate instead of the distance to a key colour, so no despill is applied.
+float4 PSPlateKey(VertData v_in) : TARGET
+{
+	float4 rgba = image.Sample(textureSampler, v_in.uv);
+	rgba.rgb *= (rgba.a > 0.) ? (1. / rgba.a) : 0.;
+
+	 float dist = FilteredPlateDiff(v_in.uv);
+	 float mask = saturate((dist - plate_tolerance) / max(plate_softness, 1e-4));
+
+	 rgba.a *= mask;
+	 rgba.rgb *= rgba.a;
+	 return rgba;
+}
+
+// Pass-through: captures the frame into the plate texture, and shows the
+// untouched source while plate mode is on but no plate has been captured yet.
+float4 PSCopy(VertData v_in) : TARGET
+{
+	return image.Sample(textureSampler, v_in.uv);
+}
+
 technique Draw
 {
 	pass
 	{
 		vertex_shader = VSDefault(v_in);
 		pixel_shader  = PSChromaKeyPro(v_in);
+	}
+}
+
+technique DrawPlate
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSPlateKey(v_in);
+	}
+}
+
+technique Copy
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSCopy(v_in);
 	}
 }

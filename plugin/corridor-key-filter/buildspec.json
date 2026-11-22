@@ -38,7 +38,7 @@
     },
     "name": "corridor-key-filter",
     "displayName": "Corridor Key 2.0",
-    "version": "2.0.1",
+    "version": "2.1.0",
     "author": "sneakyjoe (OBS port of Corridor Digital's CorridorKey)",
     "website": "https://github.com/sneakyjoeru/CorridorKey2.0-OBS",
     "email": "sneakyjoeru@users.noreply.github.com"
