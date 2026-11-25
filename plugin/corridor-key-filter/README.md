@@ -12,7 +12,7 @@ shader, no runtime toggles.
 - `data/corridor_key_2.effect` is the GPU HLSL effect: brightness-invariant
   normalized-RGB key distance + 9-tap denoise + CorridorKey despill on the whole
   foreground. One pass on the render GPU, same cost class as the built-in filter.
-- **Moving-subject mode (2.2.0)** is the one to use when the plate mask looks
+- **Moving-subject mode (2.2.x)** is the one to use when the plate mask looks
   ragged: it keeps a *running background model* instead of one frozen frame.
   Every frame the model drifts towards the picture, so anything static — the
   green screen, the wall, the shelving, the chair — is absorbed and removed,
@@ -40,12 +40,12 @@ Download your OS package from the
 [release](https://github.com/sneakyjoeru/CorridorKey2.0-OBS/releases/tag/corridor-key-2.0-obs)
 (built for OBS 31/32, 64-bit), close OBS, then:
 
-1. **Windows** — unzip `corridor-key-filter-2.2.0-windows-x64.zip` into
+1. **Windows** — unzip `corridor-key-filter-2.2.1-windows-x64.zip` into
    `C:\ProgramData\obs-studio\plugins\` (you get
    `...\plugins\corridor-key-filter\bin\64bit\corridor-key-filter.dll`).
-2. **Linux** — `mkdir -p ~/.config/obs-studio/plugins && tar -xzf corridor-key-filter-2.2.0-linux-x86_64.tar.gz -C ~/.config/obs-studio/plugins/`
+2. **Linux** — `mkdir -p ~/.config/obs-studio/plugins && tar -xzf corridor-key-filter-2.2.1-linux-x86_64.tar.gz -C ~/.config/obs-studio/plugins/`
    (Flatpak OBS: `~/.var/app/com.obsproject.Studio/config/obs-studio/plugins/`).
-3. **macOS** — run `corridor-key-filter-2.2.0-macos-universal.pkg`, or unzip the
+3. **macOS** — run `corridor-key-filter-2.2.1-macos-universal.pkg`, or unzip the
    `.zip` and copy `corridor-key-filter.plugin` into
    `~/Library/Application Support/obs-studio/plugins/`. The build is ad-hoc
    signed, not notarized: if macOS blocks it, run
