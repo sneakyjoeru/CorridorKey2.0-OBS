@@ -29,7 +29,6 @@ uniform texture2d state_image;
 uniform float motion_sensitivity = 0.06;
 uniform float motion_hold = 2.5;
 uniform float motion_learn = 0.02;
-uniform float motion_warmup = 0.0;
 
 sampler_state textureSampler {
 	Filter    = Linear;
@@ -222,10 +221,10 @@ float4 PSUpdateState(VertData v_in) : TARGET
 	float4 st = state_image.Sample(textureSampler, uv);
 
 	// The background drifts towards the frame at a rate the C side derives from
-	// the hold time (1 - exp(-dt/hold)), and much faster while warming up.
-	// Static clutter is absorbed and disappears; a moving subject is always
-	// ahead of the drift, and the area it leaves behind is re-learned quickly.
-	float learn = lerp(motion_learn, max(motion_learn, 0.25), saturate(motion_warmup));
+	// the hold time (1 - exp(-dt/hold), fast while warming up). Static clutter is
+	// absorbed and disappears; a moving subject is always ahead of the drift, and
+	// the area it leaves behind is re-learned quickly.
+	float learn = saturate(motion_learn);
 	float3 bg = lerp(st.rgb, cur, learn);
 
 	return float4(bg, 1.0);
@@ -245,9 +244,6 @@ float4 PSMovingKey(VertData v_in) : TARGET
 	float diff = FilteredStateDiff(uv);
 	float motion_keep =
 		smoothstep(motion_sensitivity, max(motion_sensitivity * 3.0, 0.02), diff);
-	// During warm-up the model is still learning the room: show the plain
-	// chroma key instead of cutting everything that has not been absorbed yet.
-	motion_keep = lerp(1.0, motion_keep, saturate(1.0 - motion_warmup));
 
 	float3 keynrm = normRGB(toLinear(key_color.rgb));
 	float gdist = FilteredKeyDist(rgba.rgb, uv, keynrm);

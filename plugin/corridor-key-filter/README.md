@@ -40,12 +40,12 @@ Download your OS package from the
 [release](https://github.com/sneakyjoeru/CorridorKey2.0-OBS/releases/tag/corridor-key-2.0-obs)
 (built for OBS 31/32, 64-bit), close OBS, then:
 
-1. **Windows** — unzip `corridor-key-filter-2.2.1-windows-x64.zip` into
+1. **Windows** — unzip `corridor-key-filter-2.2.2-windows-x64.zip` into
    `C:\ProgramData\obs-studio\plugins\` (you get
    `...\plugins\corridor-key-filter\bin\64bit\corridor-key-filter.dll`).
-2. **Linux** — `mkdir -p ~/.config/obs-studio/plugins && tar -xzf corridor-key-filter-2.2.1-linux-x86_64.tar.gz -C ~/.config/obs-studio/plugins/`
+2. **Linux** — `mkdir -p ~/.config/obs-studio/plugins && tar -xzf corridor-key-filter-2.2.2-linux-x86_64.tar.gz -C ~/.config/obs-studio/plugins/`
    (Flatpak OBS: `~/.var/app/com.obsproject.Studio/config/obs-studio/plugins/`).
-3. **macOS** — run `corridor-key-filter-2.2.1-macos-universal.pkg`, or unzip the
+3. **macOS** — run `corridor-key-filter-2.2.2-macos-universal.pkg`, or unzip the
    `.zip` and copy `corridor-key-filter.plugin` into
    `~/Library/Application Support/obs-studio/plugins/`. The build is ad-hoc
    signed, not notarized: if macOS blocks it, run

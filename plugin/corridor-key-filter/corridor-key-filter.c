@@ -47,7 +47,6 @@ struct corridor_key_filter_data {
 	gs_eparam_t *motion_sensitivity_param;
 	gs_eparam_t *motion_hold_param;
 	gs_eparam_t *motion_learn_param;
-	gs_eparam_t *motion_warmup_param;
 
 	struct vec4 color;
 	float similarity;
@@ -371,12 +370,13 @@ static void plate_capture(struct corridor_key_filter_data *filter, enum gs_color
 /* Binds the motion uniforms. Called for the seed pass as well: without the
  * warm-up flag the very first frame would be keyed before the model has
  * anything in it to compare against. */
-static void motion_bind_params(struct corridor_key_filter_data *filter, float warmup, float dt)
+static void motion_bind_params(struct corridor_key_filter_data *filter, bool warmup, float dt)
 {
 	float hold = filter->motion_hold > 0.05f ? filter->motion_hold : 0.05f;
 	/* The background absorbs a still pixel at this rate: ~63 % after the hold
-	 * time, i.e. framerate-correct without any stored clock. */
-	float learn = 1.0f - expf(-dt / hold);
+	 * time, i.e. framerate-correct without any stored clock. While warming up
+	 * it learns at full speed so the room is modelled within a second or two. */
+	float learn = warmup ? 0.25f : 1.0f - expf(-dt / hold);
 
 	if (learn < 0.0005f)
 		learn = 0.0005f;
@@ -389,8 +389,6 @@ static void motion_bind_params(struct corridor_key_filter_data *filter, float wa
 		gs_effect_set_float(filter->motion_hold_param, filter->motion_hold);
 	if (filter->motion_learn_param)
 		gs_effect_set_float(filter->motion_learn_param, learn);
-	if (filter->motion_warmup_param)
-		gs_effect_set_float(filter->motion_warmup_param, warmup);
 }
 
 /* Advances the adaptive background one frame and returns the state texture the
@@ -415,7 +413,7 @@ static gs_texture_t *motion_step(struct corridor_key_filter_data *filter, gs_tex
 		gs_effect_set_texture(filter->frame_param, frame_tex);
 
 	if (filter->state_seed_requested || !filter->state_valid) {
-		motion_bind_params(filter, 1.0f, 0.033f);
+		motion_bind_params(filter, true, 0.033f);
 		if (!draw_into(filter, &filter->state_render[0], format, space, width, height,
 			       frame_tex, "SeedState"))
 			return NULL;
@@ -445,7 +443,7 @@ static gs_texture_t *motion_step(struct corridor_key_filter_data *filter, gs_tex
 	if (prev_tex && filter->state_param)
 		gs_effect_set_texture(filter->state_param, prev_tex);
 
-	motion_bind_params(filter, now < filter->motion_warmup_until_ns ? 1.0f : 0.0f, dt);
+	motion_bind_params(filter, now < filter->motion_warmup_until_ns, dt);
 
 	if (!draw_into(filter, &filter->state_render[next], format, space, width, height, frame_tex,
 		       "UpdateState"))
@@ -548,8 +546,6 @@ static void *corridor_key_create(obs_data_t *settings, obs_source_t *context)
 		filter->motion_hold_param = gs_effect_get_param_by_name(filter->effect, "motion_hold");
 		filter->motion_learn_param =
 			gs_effect_get_param_by_name(filter->effect, "motion_learn");
-		filter->motion_warmup_param =
-			gs_effect_get_param_by_name(filter->effect, "motion_warmup");
 
 		/* Support evidence when a machine keys differently: which colour
 		 * space libobs is rendering in, and that the plate parameters exist
@@ -658,7 +654,14 @@ static void corridor_key_render(void *data, gs_effect_t *effect)
 				frame_tex = gs_texrender_get_texture(filter->frame_render);
 
 			state_tex = motion_step(filter, frame_tex, format, source_space, width, height);
-			tech_name = state_tex && frame_tex ? "DrawMotion" : "Copy";
+
+			/* While the background model is still learning the room, key with
+			 * the plain chroma pass: everything that has not been absorbed yet
+			 * stays visible instead of being cut away on frame one. */
+			if (os_gettime_ns() < filter->motion_warmup_until_ns)
+				tech_name = state_tex ? "Draw" : "Copy";
+			else
+				tech_name = state_tex && frame_tex ? "DrawMotion" : "Copy";
 
 			log_pass(filter, tech_name, state_tex, frame_tex);
 		} else if (filter->plate_mode) {
