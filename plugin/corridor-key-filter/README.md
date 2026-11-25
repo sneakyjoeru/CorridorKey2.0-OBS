@@ -12,6 +12,15 @@ shader, no runtime toggles.
 - `data/corridor_key_2.effect` is the GPU HLSL effect: brightness-invariant
   normalized-RGB key distance + 9-tap denoise + CorridorKey despill on the whole
   foreground. One pass on the render GPU, same cost class as the built-in filter.
+- **Moving-subject mode (2.2.0)** is the one to use when the plate mask looks
+  ragged: it keeps a *running background model* instead of one frozen frame.
+  Every frame the model drifts towards the picture, so anything static — the
+  green screen, the wall, the shelving, the chair — is absorbed and removed,
+  while a person who moves is always ahead of the drift and stays. The chroma
+  key still runs on top, so the green screen goes immediately and shadows on it
+  are cleaned up too. A subject that stops moving for longer than
+  *Keep a still subject for* is absorbed as well (that is what removes the
+  static room), so raise that value if you sit still a lot.
 - **Static background removal** needs no green screen at all: the filter grabs
   one frame of the empty scene into a "plate" texture (one extra GPU pass, on
   demand) and keys out everything within *plate tolerance* of that stored
@@ -31,12 +40,12 @@ Download your OS package from the
 [release](https://github.com/sneakyjoeru/CorridorKey2.0-OBS/releases/tag/corridor-key-2.0-obs)
 (built for OBS 31/32, 64-bit), close OBS, then:
 
-1. **Windows** — unzip `corridor-key-filter-2.1.2-windows-x64.zip` into
+1. **Windows** — unzip `corridor-key-filter-2.2.0-windows-x64.zip` into
    `C:\ProgramData\obs-studio\plugins\` (you get
    `...\plugins\corridor-key-filter\bin\64bit\corridor-key-filter.dll`).
-2. **Linux** — `mkdir -p ~/.config/obs-studio/plugins && tar -xzf corridor-key-filter-2.1.2-linux-x86_64.tar.gz -C ~/.config/obs-studio/plugins/`
+2. **Linux** — `mkdir -p ~/.config/obs-studio/plugins && tar -xzf corridor-key-filter-2.2.0-linux-x86_64.tar.gz -C ~/.config/obs-studio/plugins/`
    (Flatpak OBS: `~/.var/app/com.obsproject.Studio/config/obs-studio/plugins/`).
-3. **macOS** — run `corridor-key-filter-2.1.2-macos-universal.pkg`, or unzip the
+3. **macOS** — run `corridor-key-filter-2.2.0-macos-universal.pkg`, or unzip the
    `.zip` and copy `corridor-key-filter.plugin` into
    `~/Library/Application Support/obs-studio/plugins/`. The build is ad-hoc
    signed, not notarized: if macOS blocks it, run
@@ -70,12 +79,31 @@ from the per-user plugin folders.
 | Smoothness | matte feather (×1000) | 100 |
 | Despill strength | CorridorKey despill (0 = off, 1000 = full) on every kept pixel whose key channel exceeds the mean of the other two; skin/grays unchanged | 600 |
 | Denoise | 9-tap edge denoise blend | 1.0 |
+| Keep only the moving subject | moving-subject mode: adaptive background + chroma, removes everything static | off |
+| Motion threshold | how different from the learned background a pixel must be to count as "moving"; raise it until the static background disappears, lower it if parts of you vanish (×1000) | 60 |
+| Keep a still subject for | how long a pixel may stay still before the background absorbs it (0.1 s steps) | 2.5 s |
 | Remove static background | switch the keyer from a colour to the captured plate | off |
 | Plate tolerance | how far a pixel may differ from the plate and still be removed (×1000 of the 0..1 encoded range) | 60 |
 | Plate softness | feather of the plate matte (×1000) | 60 |
 | Auto-capture delay | seconds between switching plate mode on and the automatic capture; 0 = only the button captures | 5 |
 | Capture plate now | grabs the current frame as the plate — be out of shot, or cover the camera | — |
 | Clear captured plate | forget the plate (the filter then passes the image through untouched) | — |
+
+### Removing a background with a moving subject (no clean plate needed)
+
+1. Add the filter, tick **Keep only the moving subject**. The green screen is
+   gone at once (chroma), the rest of the room fades out over ~a second while
+   the model learns it.
+2. Move a little so the model separates you from the room. Raise **Motion
+   threshold** if noise or a flickering monitor keeps parts of the room alive;
+   lower it if a slowly moving arm or a sleeve disappears.
+3. **Keep a still subject for** is the trade: the room disappears *because*
+   static pixels are absorbed, so a subject that stops moving for longer than
+   this is absorbed too. 2–4 s suits most webcams; 8–10 s if you sit still.
+4. Pressing **Capture plate now** restarts the model from the current frame.
+
+Uses three small extra GPU passes per frame (one frame copy, one background
+update, the key), which is why it costs noticeably more than plain chroma key.
 
 ### Removing a static background
 

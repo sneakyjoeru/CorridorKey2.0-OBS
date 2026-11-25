@@ -21,6 +21,16 @@ uniform texture2d frame_image;
 uniform float plate_tolerance = 0.06;
 uniform float plate_softness = 0.06;
 
+// Moving subject mode: state_image.rgb is the adaptively learned background
+// (the C side ping-pongs it between two render targets). Nothing here assumes
+// how the backend stores render targets: every texture involved comes out of
+// the same copy pass.
+uniform texture2d state_image;
+uniform float motion_sensitivity = 0.06;
+uniform float motion_hold = 2.5;
+uniform float motion_learn = 0.02;
+uniform float motion_warmup = 0.0;
+
 sampler_state textureSampler {
 	Filter    = Linear;
 	AddressU  = Clamp;
@@ -170,6 +180,89 @@ float4 PSCopy(VertData v_in) : TARGET
 	return image.Sample(textureSampler, v_in.uv);
 }
 
+// --- Moving subject mode -------------------------------------------------
+// Three passes per frame: seed (below), update the background/age state, and
+// the key itself. The state target is ping-ponged by the C side.
+
+float StateDiffAt(float2 uv)
+{
+	return PlateDiff(frame_image.Sample(textureSampler, uv).rgb,
+	                 state_image.Sample(textureSampler, uv).rgb);
+}
+
+// Blurred motion distance: a single noisy pixel must not count as movement.
+float FilteredStateDiff(float2 uv)
+{
+	 float2 h = uv_pixel_interval;
+	 float d = StateDiffAt(uv - float2(h.x * 2.0, h.y));
+	 d += StateDiffAt(uv + float2(h.x * 2.0, h.y));
+	 d += StateDiffAt(uv + float2(h.x, -h.y * 2.0));
+	 d += StateDiffAt(uv + float2(-h.x, h.y * 2.0));
+	 d *= 2.0;
+	 d += StateDiffAt(uv);
+	 d /= 9.0;
+	 return lerp(StateDiffAt(uv), d, saturate(denoise));
+}
+
+// Seeds the background model from the current frame.
+float4 PSSeedState(VertData v_in) : TARGET
+{
+	return float4(frame_image.Sample(textureSampler, v_in.uv).rgb, 1.0);
+}
+
+// One step of the background model: a pixel that differs from the background is
+// moving (age 0, background frozen so the subject is never learned); a pixel
+// that matches it gets older, and once it has been still for a moment the
+// background learns it, which is what removes static non-green clutter - and
+// what lets a ghost disappear after the subject walks away.
+float4 PSUpdateState(VertData v_in) : TARGET
+{
+	float2 uv = v_in.uv;
+	float3 cur = frame_image.Sample(textureSampler, uv).rgb;
+	float4 st = state_image.Sample(textureSampler, uv);
+
+	// The background drifts towards the frame at a rate the C side derives from
+	// the hold time (1 - exp(-dt/hold)), and much faster while warming up.
+	// Static clutter is absorbed and disappears; a moving subject is always
+	// ahead of the drift, and the area it leaves behind is re-learned quickly.
+	float learn = lerp(motion_learn, max(motion_learn, 0.25), saturate(motion_warmup));
+	float3 bg = lerp(st.rgb, cur, learn);
+
+	return float4(bg, 1.0);
+}
+
+// The key: keep what is moving (age younger than the hold time) and is not the
+// green screen. The chroma term also removes the moving shadow on the screen,
+// the motion term removes everything static that is not green.
+float4 PSMovingKey(VertData v_in) : TARGET
+{
+	float2 uv = v_in.uv;
+	float4 rgba = image.Sample(textureSampler, uv);
+	rgba.rgb *= (rgba.a > 0.) ? (1. / rgba.a) : 0.;
+
+	// Keep what differs from the learned background right now: a moving person
+	// does, static clutter does not (the model has absorbed it).
+	float diff = FilteredStateDiff(uv);
+	float motion_keep =
+		smoothstep(motion_sensitivity, max(motion_sensitivity * 3.0, 0.02), diff);
+	// During warm-up the model is still learning the room: show the plain
+	// chroma key instead of cutting everything that has not been absorbed yet.
+	motion_keep = lerp(1.0, motion_keep, saturate(1.0 - motion_warmup));
+
+	float3 keynrm = normRGB(toLinear(key_color.rgb));
+	float gdist = FilteredKeyDist(rgba.rgb, uv, keynrm);
+	float green_keep = pow(saturate((gdist - similarity) / max(smoothness, 1e-4)), 1.5);
+
+	float mask = motion_keep * green_keep;
+
+	float3 desp = Despill(rgba.rgb);
+	rgba.rgb = lerp(rgba.rgb, desp, saturate(despill_strength));
+
+	rgba.a *= mask;
+	rgba.rgb *= rgba.a;
+	return rgba;
+}
+
 technique Draw
 {
 	pass
@@ -185,6 +278,33 @@ technique DrawPlate
 	{
 		vertex_shader = VSDefault(v_in);
 		pixel_shader  = PSPlateKey(v_in);
+	}
+}
+
+technique DrawMotion
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSMovingKey(v_in);
+	}
+}
+
+technique SeedState
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSSeedState(v_in);
+	}
+}
+
+technique UpdateState
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSUpdateState(v_in);
 	}
 }
 

@@ -8,6 +8,7 @@
 #include <graphics/vec2.h>
 #include <graphics/vec4.h>
 #include <util/platform.h>
+#include <math.h>
 #include <string.h>
 
 #define SETTING_KEY_COLOR   "key_color"
@@ -19,6 +20,12 @@
 #define SETTING_PLATE_TOLERANCE "plate_tolerance"
 #define SETTING_PLATE_SOFTNESS "plate_softness"
 #define SETTING_PLATE_DELAY "plate_auto_delay"
+#define SETTING_MOTION_MODE "motion_mode"
+#define SETTING_MOTION_SENSITIVITY "motion_sensitivity"
+#define SETTING_MOTION_HOLD "motion_hold"
+
+/* How long the background model is learned at full speed after a seed. */
+#define MOTION_WARMUP_NS 1500000000ULL
 
 struct corridor_key_filter_data {
 	obs_source_t *context;
@@ -35,6 +42,13 @@ struct corridor_key_filter_data {
 	gs_eparam_t *frame_param;
 	gs_eparam_t *plate_tolerance_param;
 	gs_eparam_t *plate_softness_param;
+	gs_eparam_t *image_param;
+	gs_eparam_t *state_param;
+	gs_eparam_t *motion_sensitivity_param;
+	gs_eparam_t *motion_hold_param;
+	gs_eparam_t *motion_learn_param;
+	gs_eparam_t *motion_dt_param;
+	gs_eparam_t *motion_warmup_param;
 
 	struct vec4 color;
 	float similarity;
@@ -63,6 +77,22 @@ struct corridor_key_filter_data {
 	uint64_t plate_arm_ns;
 	float plate_tolerance;
 	float plate_softness;
+
+	/* Moving subject mode: an adaptive background plus a per-pixel "how long
+	 * has this been still" age, ping-ponged between two render targets. */
+	gs_texrender_t *state_render[2];
+	unsigned state_index;
+	bool state_valid;
+	bool state_seed_requested;
+	uint64_t state_last_ns;
+	uint64_t motion_warmup_until_ns;
+
+	bool motion_mode;
+	unsigned frames;
+	uint64_t stats_ns;
+	float motion_sensitivity;
+	float motion_hold;
+	float motion_dt;
 };
 
 static const char *corridor_key_name(void *unused)
@@ -88,13 +118,20 @@ static inline void settings_update(struct corridor_key_filter_data *filter, obs_
 	filter->plate_tolerance = (float)obs_data_get_int(settings, SETTING_PLATE_TOLERANCE) / 1000.0f;
 	filter->plate_softness = (float)obs_data_get_int(settings, SETTING_PLATE_SOFTNESS) / 1000.0f;
 	filter->plate_auto_delay = (int)obs_data_get_int(settings, SETTING_PLATE_DELAY);
+
+	filter->motion_mode = obs_data_get_bool(settings, SETTING_MOTION_MODE);
+	filter->motion_sensitivity =
+		(float)obs_data_get_int(settings, SETTING_MOTION_SENSITIVITY) / 1000.0f;
+	filter->motion_hold = (float)obs_data_get_int(settings, SETTING_MOTION_HOLD) / 10.0f;
 }
 
 /* (Re)arm the auto-capture deadline, or disarm it when there is nothing to
- * capture (plate mode off, plate already captured, delay 0). */
+ * capture. Moving-subject mode seeds itself from the first frame it renders, so
+ * it never uses the countdown - "Capture plate now" re-seeds it on demand. */
 static void plate_schedule_capture(struct corridor_key_filter_data *filter)
 {
-	if (filter->plate_mode && !filter->plate_render && filter->plate_auto_delay > 0)
+	if (filter->plate_mode && !filter->motion_mode && !filter->plate_render &&
+	    filter->plate_auto_delay > 0)
 		filter->plate_arm_ns =
 			os_gettime_ns() + (uint64_t)filter->plate_auto_delay * 1000000000ULL;
 	else
@@ -156,6 +193,96 @@ static void plate_release(struct corridor_key_filter_data *filter)
 static void frame_release(struct corridor_key_filter_data *filter)
 {
 	target_release(filter, &filter->frame_render, filter->frame_param);
+}
+
+static void copy_error(struct corridor_key_filter_data *filter, const char *why);
+
+static void motion_release(struct corridor_key_filter_data *filter)
+{	null_texture_bind(filter, filter->state_param);
+
+	for (int i = 0; i < 2; i++) {
+		if (filter->state_render[i]) {
+			gs_texrender_destroy(filter->state_render[i]);
+			filter->state_render[i] = NULL;
+		}
+	}
+
+	filter->state_index = 0;
+	filter->state_valid = false;
+	filter->state_seed_requested = true;
+	filter->motion_warmup_until_ns = 0;
+}
+
+static gs_texture_t *state_texture(struct corridor_key_filter_data *filter, unsigned index)
+{
+	return filter->state_render[index] ? gs_texrender_get_texture(filter->state_render[index])
+					  : NULL;
+}
+
+/* Draws one technique of our effect into a render target. The state passes do
+ * not need the parent source (they work off our own textures), so they skip
+ * obs_source_process_filter_begin entirely and draw a single sprite. */
+static bool draw_into(struct corridor_key_filter_data *filter, gs_texrender_t **target,
+		      enum gs_color_format format, enum gs_color_space space, uint32_t width,
+		      uint32_t height, gs_texture_t *sprite, const char *tech_name)
+{
+	struct vec4 clear_color;
+	gs_technique_t *tech;
+
+	if (*target) {
+		gs_texrender_reset(*target);
+	} else {
+		*target = gs_texrender_create(format, GS_ZS_NONE);
+	}
+	if (!*target) {
+		copy_error(filter, "no render target");
+		return false;
+	}
+	if (!sprite || !filter->effect || !filter->image_param) {
+		copy_error(filter, "no source texture");
+		return false;
+	}
+	tech = gs_effect_get_technique(filter->effect, tech_name);
+	if (!tech) {
+		copy_error(filter, "technique missing");
+		return false;
+	}
+
+	if (!gs_texrender_begin_with_color_space(*target, width, height, space)) {
+		copy_error(filter, "render target begin failed");
+		return false;
+	}
+
+	vec4_zero(&clear_color);
+	gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0f, 0);
+	gs_ortho(0.0f, (float)width, 0.0f, (float)height, -100.0f, 100.0f);
+
+	gs_effect_set_texture(filter->image_param, sprite);
+
+	/* Replace, not blend: the state passes must store exactly what the shader
+	 * writes (with the ambient alpha blending the seeded frame and the age
+	 * channel both came out multiplied to ~0, so nothing ever aged). */
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+
+	size_t passes = gs_technique_begin(tech);
+	for (size_t i = 0; i < passes; i++) {
+		gs_technique_begin_pass(tech, i);
+		gs_draw_sprite(sprite, 0, width, height);
+		gs_technique_end_pass(tech);
+	}
+	gs_technique_end(tech);
+
+	gs_blend_state_pop();
+
+	gs_texrender_end(*target);
+
+	if (!gs_texrender_get_texture(*target)) {
+		copy_error(filter, "no texture after the state draw");
+		return false;
+	}
+
+	return true;
 }
 
 /* Why the last copy pass failed, logged only when the reason changes. */
@@ -242,23 +369,127 @@ static void plate_capture(struct corridor_key_filter_data *filter, enum gs_color
 	blog(LOG_INFO, "[corridor-key] static background plate captured (%ux%u)", width, height);
 }
 
+/* Advances the adaptive background one frame and returns the state texture the
+ * key pass has to compare against (the state as it was before this update).
+ * frame_tex must be this frame's copy. */
+static gs_texture_t *motion_step(struct corridor_key_filter_data *filter, gs_texture_t *frame_tex,
+				 enum gs_color_format format, enum gs_color_space space,
+				 uint32_t width, uint32_t height)
+{
+	const uint64_t now = os_gettime_ns();
+	unsigned cur;
+	unsigned next;
+	gs_texture_t *prev_tex;
+	gs_texture_t *next_tex;
+	float dt;
+
+	if (!frame_tex)
+		return NULL;
+
+	/* Every pass below (seed, update, key) samples this frame's copy. */
+	if (filter->frame_param)
+		gs_effect_set_texture(filter->frame_param, frame_tex);
+
+	if (filter->state_seed_requested || !filter->state_valid) {
+		if (!draw_into(filter, &filter->state_render[0], format, space, width, height,
+			       frame_tex, "SeedState"))
+			return NULL;
+
+		filter->state_index = 0;
+		filter->state_valid = true;
+		filter->state_seed_requested = false;
+		filter->state_last_ns = now;
+		filter->motion_warmup_until_ns = now + MOTION_WARMUP_NS;
+		blog(LOG_INFO, "[corridor-key] moving-subject background seeded (%ux%u)", width,
+		     height);
+		return state_texture(filter, 0);
+	}
+
+	dt = filter->state_last_ns ? (float)(now - filter->state_last_ns) / 1.0e9f : 0.033f;
+	if (dt < 0.002f)
+		dt = 0.002f;
+	if (dt > 0.25f)
+		dt = 0.25f;
+	filter->state_last_ns = now;
+	filter->motion_dt = dt;
+
+	cur = filter->state_index;
+	next = (cur + 1) & 1u;
+	prev_tex = state_texture(filter, cur);
+
+	if (prev_tex && filter->state_param)
+		gs_effect_set_texture(filter->state_param, prev_tex);
+
+	gs_effect_set_float(filter->motion_sensitivity_param, filter->motion_sensitivity);
+	gs_effect_set_float(filter->motion_hold_param, filter->motion_hold);
+	/* The background absorbs a still pixel at this rate: ~63 % after the hold
+	 * time, i.e. framerate-correct without any stored clock. */
+	{
+		float hold = filter->motion_hold > 0.05f ? filter->motion_hold : 0.05f;
+		float learn = 1.0f - expf(-filter->motion_dt / hold);
+		if (learn < 0.0005f)
+			learn = 0.0005f;
+		if (learn > 0.5f)
+			learn = 0.5f;
+		gs_effect_set_float(filter->motion_learn_param, learn);
+	}
+	gs_effect_set_float(filter->motion_dt_param, filter->motion_dt);
+	gs_effect_set_float(filter->motion_warmup_param,
+			    now < filter->motion_warmup_until_ns ? 1.0f : 0.0f);
+
+	if (!draw_into(filter, &filter->state_render[next], format, space, width, height, frame_tex,
+		       "UpdateState"))
+		return prev_tex;
+
+	next_tex = state_texture(filter, next);
+	if (!next_tex)
+		return prev_tex;
+
+	/* The compare texture for this frame is the state before the update, which
+	 * the compose pass still has bound; the freshly written one becomes the
+	 * next frame's "previous". */
+	filter->state_index = next;
+
+	filter->frames++;
+	if (!filter->stats_ns || now - filter->stats_ns >= 10000000000ULL) {
+		filter->stats_ns = now;
+		blog(LOG_DEBUG,
+		     "[corridor-key] motion: %u frames, dt %.3f s, warmup %d, state %u/%u, "
+		     "hold %.2f s sens %.3f params %p/%p/%p",
+		     filter->frames, filter->motion_dt,
+		     now < filter->motion_warmup_until_ns ? 1 : 0, cur, next, filter->motion_hold,
+		     filter->motion_sensitivity, (void *)filter->motion_hold_param,
+		     (void *)filter->motion_sensitivity_param, (void *)filter->motion_learn_param);
+		filter->frames = 0;
+	}
+
+	return prev_tex;
+}
+
 static void corridor_key_update(void *data, obs_data_t *settings)
 {
 	struct corridor_key_filter_data *filter = data;
 
 	settings_update(filter, settings);
 	plate_schedule_capture(filter);
+
+	/* Switching moving-subject mode on (or a colour-space change) starts the
+	 * background model from a fresh frame. */
+	if (filter->motion_mode && !filter->state_valid)
+		filter->state_seed_requested = true;
 }
 
 static void corridor_key_destroy(void *data)
 {
 	struct corridor_key_filter_data *filter = data;
 
-	if (filter->effect || filter->plate_render || filter->frame_render || filter->null_texture) {
+	if (filter->effect || filter->plate_render || filter->frame_render || filter->state_render[0] ||
+	    filter->state_render[1] || filter->null_texture) {
 		obs_enter_graphics();
 
 		plate_release(filter);
 		frame_release(filter);
+		motion_release(filter);
 
 		if (filter->null_texture) {
 			gs_texture_destroy(filter->null_texture);
@@ -300,16 +531,27 @@ static void *corridor_key_create(obs_data_t *settings, obs_source_t *context)
 			gs_effect_get_param_by_name(filter->effect, "plate_tolerance");
 		filter->plate_softness_param =
 			gs_effect_get_param_by_name(filter->effect, "plate_softness");
+		filter->image_param = gs_effect_get_param_by_name(filter->effect, "image");
+		filter->state_param = gs_effect_get_param_by_name(filter->effect, "state_image");
+		filter->motion_sensitivity_param =
+			gs_effect_get_param_by_name(filter->effect, "motion_sensitivity");
+		filter->motion_hold_param = gs_effect_get_param_by_name(filter->effect, "motion_hold");
+		filter->motion_learn_param =
+			gs_effect_get_param_by_name(filter->effect, "motion_learn");
+		filter->motion_dt_param = gs_effect_get_param_by_name(filter->effect, "motion_dt");
+		filter->motion_warmup_param =
+			gs_effect_get_param_by_name(filter->effect, "motion_warmup");
 
 		/* Support evidence when a machine keys differently: which colour
 		 * space libobs is rendering in, and that the plate parameters exist
 		 * (a missing parameter means plate mode would compare black on
 		 * black and key everything). */
 		blog(LOG_INFO,
-		     "[corridor-key] ready (linear sRGB: %s, params plate=%p frame=%p tol=%p soft=%p)",
+		     "[corridor-key] ready (linear sRGB: %s, params plate=%p frame=%p tol=%p soft=%p "
+		     "state=%p)",
 		     gs_get_linear_srgb() ? "on" : "off", (void *)filter->plate_param,
 		     (void *)filter->frame_param, (void *)filter->plate_tolerance_param,
-		     (void *)filter->plate_softness_param);
+		     (void *)filter->plate_softness_param, (void *)filter->state_param);
 	}
 
 	obs_leave_graphics();
@@ -326,6 +568,9 @@ static void *corridor_key_create(obs_data_t *settings, obs_source_t *context)
 	obs_data_set_default_int(settings, SETTING_PLATE_TOLERANCE, 60);
 	obs_data_set_default_int(settings, SETTING_PLATE_SOFTNESS, 60);
 	obs_data_set_default_int(settings, SETTING_PLATE_DELAY, 5);
+	obs_data_set_default_bool(settings, SETTING_MOTION_MODE, false);
+	obs_data_set_default_int(settings, SETTING_MOTION_SENSITIVITY, 60);
+	obs_data_set_default_int(settings, SETTING_MOTION_HOLD, 25);
 
 	if (!filter->effect) {
 		corridor_key_destroy(filter);
@@ -362,10 +607,12 @@ static void corridor_key_render(void *data, gs_effect_t *effect)
 		const char *tech_name = "Draw";
 		gs_texture_t *plate_tex = NULL;
 		gs_texture_t *frame_tex = NULL;
+		gs_texture_t *state_tex = NULL;
 
 		if (filter->plate_clear_requested) {
 			plate_release(filter);
 			filter->plate_clear_requested = false;
+			filter->state_seed_requested = true;
 			plate_schedule_capture(filter);
 		}
 
@@ -373,6 +620,7 @@ static void corridor_key_render(void *data, gs_effect_t *effect)
 		if (filter->plate_format != format) {
 			plate_release(filter);
 			frame_release(filter);
+			motion_release(filter);
 			filter->plate_format = format;
 		}
 
@@ -383,12 +631,28 @@ static void corridor_key_render(void *data, gs_effect_t *effect)
 
 		/* Every copy pass below runs its own begin/end pair before the key
 		 * pass, so it always reads the unkeyed frame. */
-		if (filter->plate_mode && filter->plate_capture_requested) {
-			plate_capture(filter, format, source_space, width, height);
+		if (filter->plate_capture_requested) {
 			filter->plate_capture_requested = false;
+
+			if (filter->motion_mode) {
+				/* "Capture plate now" restarts the background model;
+				 * the frame copy taken below is the new seed. */
+				filter->state_seed_requested = true;
+			} else if (filter->plate_mode) {
+				plate_capture(filter, format, source_space, width, height);
+			}
 		}
 
-		if (filter->plate_mode) {
+		if (filter->motion_mode) {
+			if (copy_frame_into(filter, &filter->frame_render, filter->frame_param, format,
+					    source_space, width, height))
+				frame_tex = gs_texrender_get_texture(filter->frame_render);
+
+			state_tex = motion_step(filter, frame_tex, format, source_space, width, height);
+			tech_name = state_tex && frame_tex ? "DrawMotion" : "Copy";
+
+			log_pass(filter, tech_name, state_tex, frame_tex);
+		} else if (filter->plate_mode) {
 			plate_tex = plate_texture(filter);
 
 			if (!plate_tex)
@@ -425,6 +689,13 @@ static void corridor_key_render(void *data, gs_effect_t *effect)
 
 				gs_effect_set_float(filter->plate_tolerance_param, filter->plate_tolerance);
 				gs_effect_set_float(filter->plate_softness_param, filter->plate_softness);
+			}
+
+			if (state_tex && frame_tex && filter->state_param && filter->frame_param) {
+				/* Same rule for the moving-subject pass: the state and the
+				 * frame copy were both written by our own passes. */
+				gs_effect_set_texture(filter->state_param, state_tex);
+				gs_effect_set_texture(filter->frame_param, frame_tex);
 			}
 
 			gs_blend_state_push();
@@ -494,6 +765,14 @@ static obs_properties_t *corridor_key_properties(void *data)
 	obs_properties_add_int_slider(props, SETTING_SMOOTHNESS, "Smoothness", 1, 1000, 1);
 	obs_properties_add_int_slider(props, SETTING_DESPILL, "Despill strength", 0, 1000, 1);
 	obs_properties_add_float_slider(props, SETTING_DENOISE, "Denoise (edge blur of key distance)", 0.0, 1.0, 0.01);
+
+	obs_properties_add_bool(props, SETTING_MOTION_MODE,
+				"Keep only the moving subject (removes everything static)");
+	obs_properties_add_int_slider(props, SETTING_MOTION_SENSITIVITY,
+				      "Motion threshold (raise until the static background goes away)",
+				      5, 600, 5);
+	obs_properties_add_int_slider(props, SETTING_MOTION_HOLD,
+				      "Keep a still subject for (0.1 s steps)", 1, 100, 1);
 
 	obs_properties_add_bool(props, SETTING_PLATE_MODE,
 				"Remove static background (captured plate)");
