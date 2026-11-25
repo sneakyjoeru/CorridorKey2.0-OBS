@@ -27,7 +27,7 @@ uniform float plate_softness = 0.06;
 // the same copy pass.
 uniform texture2d state_image;
 uniform float motion_sensitivity = 0.06;
-uniform float motion_hold = 2.5;
+uniform float motion_hold = 10.0;
 uniform float motion_learn = 0.02;
 
 sampler_state textureSampler {
@@ -179,6 +179,40 @@ float4 PSCopy(VertData v_in) : TARGET
 	return image.Sample(textureSampler, v_in.uv);
 }
 
+// 1 = the colour is the key colour (green screen), 0 = clearly not.
+float Greenness(float3 srgb, float3 keynrm)
+{
+	float d = KeyDist(srgb, keynrm);
+	return 1.0 - smoothstep(similarity, similarity + max(smoothness, 1e-4), d);
+}
+
+// Average greenness of eight samples around the pixel at the given radius.
+float GreenAround(float2 uv, float3 keynrm, float r)
+{
+	float g = Greenness(image.Sample(textureSampler, uv + float2(r, 0.0)).rgb, keynrm);
+	g += Greenness(image.Sample(textureSampler, uv + float2(-r, 0.0)).rgb, keynrm);
+	g += Greenness(image.Sample(textureSampler, uv + float2(0.0, r)).rgb, keynrm);
+	g += Greenness(image.Sample(textureSampler, uv + float2(0.0, -r)).rgb, keynrm);
+	g += Greenness(image.Sample(textureSampler, uv + float2(r, r) * 0.7).rgb, keynrm);
+	g += Greenness(image.Sample(textureSampler, uv + float2(-r, r) * 0.7).rgb, keynrm);
+	g += Greenness(image.Sample(textureSampler, uv + float2(r, -r) * 0.7).rgb, keynrm);
+	g += Greenness(image.Sample(textureSampler, uv + float2(-r, -r) * 0.7).rgb, keynrm);
+	return g / 8.0;
+}
+
+// Is this pixel standing in front of the green screen? The background model
+// cannot answer that for a subject who was already in frame when the filter was
+// switched on - the model then holds the subject, not the screen. Evidence
+// around the pixel can: inside the screen most samples are green, in the room
+// none are. Two radii so that a subject wider than half the frame is still
+// recognised, and the room (which is not surrounded by green) is not.
+float ScreenPrior(float2 uv, float3 keynrm)
+{
+	float near_avg = GreenAround(uv, keynrm, 0.08);
+	float far_avg = GreenAround(uv, keynrm, 0.22);
+	return max(smoothstep(0.25, 0.60, near_avg), smoothstep(0.20, 0.55, far_avg));
+}
+
 // --- Moving subject mode -------------------------------------------------
 // Three passes per frame: seed (below), update the background/age state, and
 // the key itself. The state target is ping-ponged by the C side.
@@ -239,17 +273,30 @@ float4 PSMovingKey(VertData v_in) : TARGET
 	float4 rgba = image.Sample(textureSampler, uv);
 	rgba.rgb *= (rgba.a > 0.) ? (1. / rgba.a) : 0.;
 
-	// Keep what differs from the learned background right now: a moving person
-	// does, static clutter does not (the model has absorbed it).
+	float3 keynrm = normRGB(toLinear(key_color.rgb));
+
+	// (a) keep what differs from the learned background right now
 	float diff = FilteredStateDiff(uv);
 	float motion_keep =
 		smoothstep(motion_sensitivity, max(motion_sensitivity * 3.0, 0.02), diff);
 
-	float3 keynrm = normRGB(toLinear(key_color.rgb));
+	// (b) keep anything that stands in front of the green screen, moving or
+	// not: a person who sits still in front of the screen is not background and
+	// must stay visible no matter how long they hold still. "In front of the
+	// screen" is both what the model learned (green there) and the local
+	// evidence around the pixel, which also covers a subject who was already in
+	// frame when the filter was switched on.
+	float3 bg = state_image.Sample(textureSampler, uv).rgb;
+	float model_screen = Greenness(bg, keynrm);
+	float in_screen = max(model_screen, ScreenPrior(uv, keynrm));
+
+	float keep = max(motion_keep, in_screen);
+
+	// (c) never keep the screen itself
 	float gdist = FilteredKeyDist(rgba.rgb, uv, keynrm);
 	float green_keep = pow(saturate((gdist - similarity) / max(smoothness, 1e-4)), 1.5);
 
-	float mask = motion_keep * green_keep;
+	float mask = keep * green_keep;
 
 	float3 desp = Despill(rgba.rgb);
 	rgba.rgb = lerp(rgba.rgb, desp, saturate(despill_strength));

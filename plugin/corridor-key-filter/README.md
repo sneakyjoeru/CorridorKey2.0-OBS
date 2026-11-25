@@ -12,15 +12,20 @@ shader, no runtime toggles.
 - `data/corridor_key_2.effect` is the GPU HLSL effect: brightness-invariant
   normalized-RGB key distance + 9-tap denoise + CorridorKey despill on the whole
   foreground. One pass on the render GPU, same cost class as the built-in filter.
-- **Moving-subject mode (2.2.x)** is the one to use when the plate mask looks
-  ragged: it keeps a *running background model* instead of one frozen frame.
-  Every frame the model drifts towards the picture, so anything static — the
-  green screen, the wall, the shelving, the chair — is absorbed and removed,
-  while a person who moves is always ahead of the drift and stays. The chroma
-  key still runs on top, so the green screen goes immediately and shadows on it
-  are cleaned up too. A subject that stops moving for longer than
-  *Keep a still subject for* is absorbed as well (that is what removes the
-  static room), so raise that value if you sit still a lot.
+- **Moving-subject mode (2.3)** is the one to use when the plate mask looks
+  ragged: it keeps a *running background model* instead of one frozen frame and
+  keys on two rules, either of which keeps a pixel:
+  1. **it differs from the model right now** — anything that moves, and
+  2. **it stands in front of the green screen** — judged from the model *and*
+     from the green around the pixel, so a person who was already sitting in
+     frame when the option was switched on, or who holds completely still for
+     minutes, stays fully visible.
+  Everything else is absorbed into the model and removed — the green screen at
+  once (the chroma key still runs on top, so shadows on it go too), other static
+  things after *Hide static objects after* (default 10 s). A moving prop is kept
+  while it moves and disappears about that long after it stops. Outside the
+  green screen a frozen subject is treated like any other static object, so keep
+  the screen behind you if you plan to stand still.
 - **Static background removal** needs no green screen at all: the filter grabs
   one frame of the empty scene into a "plate" texture (one extra GPU pass, on
   demand) and keys out everything within *plate tolerance* of that stored
@@ -40,12 +45,12 @@ Download your OS package from the
 [release](https://github.com/sneakyjoeru/CorridorKey2.0-OBS/releases/tag/corridor-key-2.0-obs)
 (built for OBS 31/32, 64-bit), close OBS, then:
 
-1. **Windows** — unzip `corridor-key-filter-2.2.2-windows-x64.zip` into
+1. **Windows** — unzip `corridor-key-filter-2.3.0-windows-x64.zip` into
    `C:\ProgramData\obs-studio\plugins\` (you get
    `...\plugins\corridor-key-filter\bin\64bit\corridor-key-filter.dll`).
-2. **Linux** — `mkdir -p ~/.config/obs-studio/plugins && tar -xzf corridor-key-filter-2.2.2-linux-x86_64.tar.gz -C ~/.config/obs-studio/plugins/`
+2. **Linux** — `mkdir -p ~/.config/obs-studio/plugins && tar -xzf corridor-key-filter-2.3.0-linux-x86_64.tar.gz -C ~/.config/obs-studio/plugins/`
    (Flatpak OBS: `~/.var/app/com.obsproject.Studio/config/obs-studio/plugins/`).
-3. **macOS** — run `corridor-key-filter-2.2.2-macos-universal.pkg`, or unzip the
+3. **macOS** — run `corridor-key-filter-2.3.0-macos-universal.pkg`, or unzip the
    `.zip` and copy `corridor-key-filter.plugin` into
    `~/Library/Application Support/obs-studio/plugins/`. The build is ad-hoc
    signed, not notarized: if macOS blocks it, run
@@ -79,9 +84,9 @@ from the per-user plugin folders.
 | Smoothness | matte feather (×1000) | 100 |
 | Despill strength | CorridorKey despill (0 = off, 1000 = full) on every kept pixel whose key channel exceeds the mean of the other two; skin/grays unchanged | 600 |
 | Denoise | 9-tap edge denoise blend | 1.0 |
-| Keep only the moving subject | moving-subject mode: adaptive background + chroma, removes everything static | off |
-| Motion threshold | how different from the learned background a pixel must be to count as "moving"; raise it until the static background disappears, lower it if parts of you vanish (×1000) | 60 |
-| Keep a still subject for | how long a pixel may stay still before the background absorbs it (0.1 s steps) | 2.5 s |
+| Keep only the moving subject | moving-subject mode: adaptive background + chroma; keeps anything that moves or stands in front of the screen | off |
+| Motion threshold | how different from the learned background a pixel must be to count as "moving"; raise it until the static background disappears, lower it if a slowly moving arm disappears (×1000) | 60 |
+| Hide static objects after | how long a static object may stay before the background absorbs it (×0.1 s) | 10.0 s |
 | Remove static background | switch the keyer from a colour to the captured plate | off |
 | Plate tolerance | how far a pixel may differ from the plate and still be removed (×1000 of the 0..1 encoded range) | 60 |
 | Plate softness | feather of the plate matte (×1000) | 60 |
@@ -91,15 +96,16 @@ from the per-user plugin folders.
 
 ### Removing a background with a moving subject (no clean plate needed)
 
-1. Add the filter, tick **Keep only the moving subject**. The green screen is
-   gone at once (chroma), the rest of the room fades out over ~a second while
-   the model learns it.
-2. Move a little so the model separates you from the room. Raise **Motion
-   threshold** if noise or a flickering monitor keeps parts of the room alive;
-   lower it if a slowly moving arm or a sleeve disappears.
-3. **Keep a still subject for** is the trade: the room disappears *because*
-   static pixels are absorbed, so a subject that stops moving for longer than
-   this is absorbed too. 2–4 s suits most webcams; 8–10 s if you sit still.
+1. Add the filter and tick **Keep only the moving subject** — you can do it
+   while you are already sitting in front of the screen. You stay visible; the
+   screen goes at once and the rest of the room fades out within a second or two
+   while the model learns it.
+2. Raise **Motion threshold** if noise or a flickering monitor keeps parts of
+   the room alive; lower it if a slowly moving arm disappears.
+3. **Hide static objects after** is the knob for clutter: a prop that stops
+   moving is absorbed and hidden after about this long (default 10 s). You are
+   not affected by it as long as you are in front of the green screen — the
+   filter keeps what stands in front of the screen regardless of movement.
 4. Pressing **Capture plate now** restarts the model from the current frame.
 
 Uses three small extra GPU passes per frame (one frame copy, one background

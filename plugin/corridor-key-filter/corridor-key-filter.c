@@ -376,7 +376,10 @@ static void motion_bind_params(struct corridor_key_filter_data *filter, bool war
 	/* The background absorbs a still pixel at this rate: ~63 % after the hold
 	 * time, i.e. framerate-correct without any stored clock. While warming up
 	 * it learns at full speed so the room is modelled within a second or two. */
-	float learn = warmup ? 0.25f : 1.0f - expf(-dt / hold);
+	/* Three time constants per hold: after the hold time ~95 % of a static
+	 * pixel has been absorbed, which is what "hide static objects after about
+	 * this many seconds" means to a user. */
+	float learn = warmup ? 0.25f : 1.0f - expf(-3.0f * dt / hold);
 
 	if (learn < 0.0005f)
 		learn = 0.0005f;
@@ -575,7 +578,7 @@ static void *corridor_key_create(obs_data_t *settings, obs_source_t *context)
 	obs_data_set_default_int(settings, SETTING_PLATE_DELAY, 5);
 	obs_data_set_default_bool(settings, SETTING_MOTION_MODE, false);
 	obs_data_set_default_int(settings, SETTING_MOTION_SENSITIVITY, 60);
-	obs_data_set_default_int(settings, SETTING_MOTION_HOLD, 25);
+	obs_data_set_default_int(settings, SETTING_MOTION_HOLD, 100);
 
 	if (!filter->effect) {
 		corridor_key_destroy(filter);
@@ -784,7 +787,7 @@ static obs_properties_t *corridor_key_properties(void *data)
 				      "Motion threshold (raise until the static background goes away)",
 				      5, 600, 5);
 	obs_properties_add_int_slider(props, SETTING_MOTION_HOLD,
-				      "Keep a still subject for (0.1 s steps)", 1, 100, 1);
+				      "Hide static objects after (seconds x10)", 10, 600, 10);
 
 	obs_properties_add_bool(props, SETTING_PLATE_MODE,
 				"Remove static background (captured plate)");
